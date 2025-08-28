@@ -25,7 +25,8 @@ import math
 from tqdm.auto import tqdm
 from diffusers.training_utils import compute_snr
 import torchvision.transforms.functional as TF
-
+from lora_utils import wrap_unet_with_lora
+from lora_io import save_lora_adapters, load_lora_adapters
 
 
 class VitonHDDataset(data.Dataset):
@@ -331,6 +332,9 @@ def main():
     unet.config.encoder_hid_dim_type = "ip_image_proj"
     unet.config["encoder_hid_dim"] = image_encoder.config.hidden_size
     unet.config["encoder_hid_dim_type"] = "ip_image_proj"
+    
+
+
 
 
     state_dict = torch.load(args.pretrained_ip_adapter_path, map_location="cpu")
@@ -391,7 +395,7 @@ def main():
     text_encoder_2.requires_grad_(False)
     image_encoder.requires_grad_(False)
     unet_encoder.requires_grad_(False)
-    unet.requires_grad_(True)
+    
 
 
 
@@ -421,16 +425,9 @@ def main():
     else:
         optimizer_class = torch.optim.AdamW
 
-    params_to_opt = itertools.chain(unet.parameters())
+    
 
 
-    optimizer = optimizer_class(
-        params_to_opt,
-        lr=args.learning_rate,
-        betas=(args.adam_beta1, args.adam_beta2),
-        weight_decay=args.adam_weight_decay,
-        eps=args.adam_epsilon,
-    )
     
     train_dataset = VitonHDDataset(
         dataroot_path=args.data_dir,
@@ -457,7 +454,36 @@ def main():
         batch_size=args.test_batch_size,
         num_workers=4,
     )
+    # parameters for lora
+    LORA_R = 8
+    LORA_ALPHA = 16.0
+    LORA_DROPOUT = 0.05
+    TARGET_KEYWORDS = ("to_q", "to_k", "to_v", "to_out", "proj_out")
 
+    # wrap
+    replaced, trainable_adapters = wrap_unet_with_lora(
+        unet,
+        target_keywords=TARGET_KEYWORDS,
+        r=LORA_R, alpha=LORA_ALPHA, dropout=LORA_DROPOUT
+    )
+
+    print("Wrapped UNet with LoRA adapters. Replaced modules:", len(replaced))
+    # freeze all non-LoRA params
+    for n, p in unet.named_parameters():
+        if "lora" not in n:
+            p.requires_grad = False
+
+
+    # un-freeze LoRA params
+    lora_params = [p for p in unet.parameters() if p.requires_grad]
+    print("LoRA trainable param count:", sum(p.numel() for p in lora_params))
+
+    # optimizer over LoRA params only
+    optimizer = torch.optim.AdamW(
+    list(lora_params) + list(image_proj_model.parameters()),
+    lr=1e-4,
+    weight_decay=0.01
+    )
     overrode_max_train_steps = False
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     if args.max_train_steps is None:
@@ -773,24 +799,11 @@ def main():
                 unwrapped_unet = accelerator.unwrap_model(
                     unet, keep_fp32_wrapper=True
                 )
-                pipeline = TryonPipeline.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    unet=unwrapped_unet,
-                    vae= vae,
-                    scheduler=noise_scheduler,
-                    tokenizer=tokenizer,
-                    tokenizer_2=tokenizer_2,
-                    text_encoder=text_encoder,
-                    text_encoder_2=text_encoder_2,
-                    image_encoder=image_encoder,
-                    unet_encoder=unet_encoder,
-                    torch_dtype=torch.float16,
-                    add_watermarker=False,
-                    safety_checker=None,
-                )
                 save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                pipeline.save_pretrained(save_path)
-                del pipeline
+
+                # Save only LoRA adapters (tiny .pt file)
+                save_lora_adapters(unwrapped_unet, os.path.join(save_path, "lora.safetensors"))
+    
 
                 
 if __name__ == "__main__":

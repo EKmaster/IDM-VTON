@@ -41,7 +41,7 @@ from src.unet_hacked_tryon import UNet2DConditionModel
 from src.unet_hacked_garmnet import UNet2DConditionModel as UNet2DConditionModel_ref
 from src.tryon_pipeline import StableDiffusionXLInpaintPipeline as TryonPipeline
 
-
+from lora_utils import load_lora_adapters
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -240,6 +240,9 @@ def main():
         subfolder="unet",
         torch_dtype=torch.float16,
     )
+    lora_path = "/path/to/checkpoint/lora.safetensors"
+    load_lora_adapters(unet, lora_path)
+    print("Loaded LoRA adapters into UNet for inference")
     image_encoder = CLIPVisionModelWithProjection.from_pretrained(
         args.pretrained_model_name_or_path,
         subfolder="image_encoder",
