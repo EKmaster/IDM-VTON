@@ -478,6 +478,9 @@ def main():
     lora_params = [p for p in unet.parameters() if p.requires_grad]
     print("LoRA trainable param count:", sum(p.numel() for p in lora_params))
 
+    
+    params_to_opt = itertools.chain(unet.parameters())
+
     # optimizer over LoRA params only
     optimizer = torch.optim.AdamW(
     list(lora_params) + list(image_proj_model.parameters()),
@@ -750,7 +753,7 @@ def main():
 
                 
                 if args.snr_gamma is None:
-                    loss = F.mse_loss(noise_pred.float(), target.float(), reduction="mean")
+                    loss = F.smooth_l1_loss(noise_pred.float(), target.float(), beta=0.5, reduction="mean")
                 else:
                     # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
                     # Since we predict the noise instead of x_0, the original formulation is slightly changed.
@@ -763,7 +766,7 @@ def main():
                         torch.stack([snr, args.snr_gamma * torch.ones_like(timesteps)], dim=1).min(dim=1)[0] / snr
                     )
 
-                    loss = F.mse_loss(noise_pred.float(), target.float(), reduction="none")
+                    loss = F.smooth_l1_loss(noise_pred.float(), target.float(), beta=0.5, reduction="none")
                     loss = loss.mean(dim=list(range(1, len(loss.shape)))) * mse_loss_weights
                     loss = loss.mean()
 
