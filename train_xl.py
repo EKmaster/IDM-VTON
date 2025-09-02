@@ -27,7 +27,7 @@ from diffusers.training_utils import compute_snr
 import torchvision.transforms.functional as TF
 from lora_utils import wrap_unet_with_lora
 from lora_io import save_lora_adapters, load_lora_adapters
-
+from transformer2d import Transformer2D
 
 class VitonHDDataset(data.Dataset):
     def __init__(
@@ -296,11 +296,41 @@ def parse_args():
     return args
 
 
+def add_hybrid_blocks(unet, cross_attn=False, attach_down_up=True):
+    # choose dims (match channel dims in the blocks)
+    mid_ch = unet.config.block_out_channels[-1]  # typical bottleneck channel
+    unet.mid_block.hybrid = Transformer2D(mid_ch, cross_attn=cross_attn)
 
+    if attach_down_up:
+        # choose deep block channels; adjust indices if your UNet differs
+        deepest_ch = unet.config.block_out_channels[-1]
+        unet.down_blocks[-1].hybrid = Transformer2D(deepest_ch, cross_attn=cross_attn)
+        unet.up_blocks[0].hybrid = Transformer2D(deepest_ch, cross_attn=cross_attn)
+
+    # patch forward functions to run the hybrid module on the hidden states
+    def _patch_block_forward(block):
+        orig = block.forward
+        def new_forward(*args, **kwargs):
+            out = orig(*args, **kwargs)
+            # many diffusers blocks return tuple (hidden_states, ...), handle both
+            if isinstance(out, tuple):
+                hidden = out[0]
+                if hasattr(block, "hybrid"):
+                    hidden = block.hybrid(hidden, kwargs.get("encoder_hidden_states", None))
+                out = (hidden, ) + out[1:]
+            else:
+                if hasattr(block, "hybrid"):
+                    out = block.hybrid(out, kwargs.get("encoder_hidden_states", None))
+            return out
+        block.forward = new_forward
+
+    _patch_block_forward(unet.mid_block)
+    _patch_block_forward(unet.down_blocks[-1])
+    _patch_block_forward(unet.up_blocks[0])
 
 
 def main():
-
+    
 
     args = parse_args()
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir)
@@ -333,6 +363,7 @@ def main():
     unet.config["encoder_hid_dim"] = image_encoder.config.hidden_size
     unet.config["encoder_hid_dim_type"] = "ip_image_proj"
     
+    add_hybrid_blocks(unet, cross_attn=False, attach_down_up=True)
 
 
 
@@ -478,7 +509,7 @@ def main():
     lora_params = [p for p in unet.parameters() if p.requires_grad]
     print("LoRA trainable param count:", sum(p.numel() for p in lora_params))
 
-    
+
     params_to_opt = itertools.chain(unet.parameters())
 
     # optimizer over LoRA params only
